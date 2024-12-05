@@ -1149,6 +1149,10 @@ void IcingaDB::InsertCheckableDependencies(const Checkable::Ptr& checkable, std:
 	auto& hmsetDependencyEdges(hMSets[m_PrefixConfigObject + "dependency:edge"]);
 	auto& hmsetRedundancyGroups(hMSets[m_PrefixConfigObject + "redundancygroup"]);
 
+	// If this isn't a runtime update, we need to send initial state updates for the dependencies as well.
+	auto& hmsetDependenciesStates(hMSets[m_PrefixConfigObject + "dependency:edge:state"]);
+	auto& hmsetRedundancyGroupsStates(hMSets[m_PrefixConfigObject + "redundancygroup:state"]);
+
 	auto [host, service] = GetHostService(checkable);
 	auto checkableId(GetObjectIdentifier(checkable));
 	{
@@ -1166,12 +1170,16 @@ void IcingaDB::InsertCheckableDependencies(const Checkable::Ptr& checkable, std:
 
 	for (auto& dependencyGroup : checkable->GetDependencyGroups()) {
 		String redundancyGroupId(dependencyGroup->GetIcingaDBIdentifier());
-		if (dependencyGroup->IsRedundancyGroup()) {
+		bool syncSharedEdgeState(false);
+		if (!dependencyGroup->IsRedundancyGroup()) {
+			syncSharedEdgeState = runtimeUpdates || m_DumpedGlobals.RedundancyGroup.IsNew(dependencyGroup->GetCompositeKey());
+		} else {
 			redundancyGroupId = HashValue(new Array{m_EnvironmentId, dependencyGroup->GetCompositeKey()});
 			dependencyGroup->SetIcingaDBIdentifier(redundancyGroupId);
 
 			// Sync redundancy group information only once unless it's a runtime update.
 			if (runtimeUpdates || m_DumpedGlobals.RedundancyGroup.IsNew(redundancyGroupId)) {
+				syncSharedEdgeState = true;
 				Dictionary::Ptr groupData(SerializeRedundancyGroup(dependencyGroup));
 				hmsetRedundancyGroups.emplace_back(redundancyGroupId);
 				hmsetRedundancyGroups.emplace_back(JsonEncode(groupData));
@@ -1187,6 +1195,17 @@ void IcingaDB::InsertCheckableDependencies(const Checkable::Ptr& checkable, std:
 				if (runtimeUpdates) {
 					AddObjectDataToRuntimeUpdates(*runtimeUpdates, redundancyGroupId, m_PrefixConfigObject + "redundancygroup", groupData);
 					AddObjectDataToRuntimeUpdates(*runtimeUpdates, redundancyGroupId, m_PrefixConfigObject + "dependency:node", nodeData);
+				} else {
+					auto stateAttrs(SerializeRedundancyGroup(dependencyGroup, true));
+					hmsetRedundancyGroupsStates.emplace_back(redundancyGroupId);
+					hmsetRedundancyGroupsStates.emplace_back(JsonEncode(stateAttrs));
+
+					hmsetDependenciesStates.emplace_back(redundancyGroupId);
+					hmsetDependenciesStates.emplace_back(JsonEncode(Dictionary::Ptr(new Dictionary{
+						{"id", redundancyGroupId},
+						{"environment_id", m_EnvironmentId},
+						{"failed", stateAttrs->Get("failed")},
+					})));
 				}
 			}
 
@@ -1213,12 +1232,19 @@ void IcingaDB::InsertCheckableDependencies(const Checkable::Ptr& checkable, std:
 			auto dependency(*it);
 			auto parent(dependency->GetParent());
 			String displayName;
+			Dictionary::Ptr memberStateAttrs;
 
 			// Find all members that share the same parent starting from the iterator position ("it" inclusively),
 			// and merge their relevant state information into a single one.
 			auto [begin, end] = std::equal_range(it, members.end(), parent, Dependency::ParentComparator{});
 			std::for_each(begin, end, [&](const Dependency::Ptr& member) {
 				displayName += (displayName.IsEmpty() ? "" : ", ") + member->GetShortName();
+				if (syncSharedEdgeState && !memberStateAttrs) {
+					memberStateAttrs = SerializeDependencyEdgeState(dependencyGroup, dependency);
+					if (memberStateAttrs->Get("failed") == false) {
+						memberStateAttrs->Set("failed", !(dependencyGroup->GetState() & DependencyGroup::State::ReachableOK));
+					}
+				}
 			});
 			it = end; // Advance the iterator to either end of the container or beginning of the next members block.
 
@@ -1240,6 +1266,9 @@ void IcingaDB::InsertCheckableDependencies(const Checkable::Ptr& checkable, std:
 
 			if (runtimeUpdates) {
 				AddObjectDataToRuntimeUpdates(*runtimeUpdates, edgeId, m_PrefixConfigObject + "dependency:edge", data);
+			} else if (syncSharedEdgeState) {
+				hmsetDependenciesStates.emplace_back(edgeStateId);
+				hmsetDependenciesStates.emplace_back(JsonEncode(memberStateAttrs));
 			}
 		}
 	}
