@@ -77,8 +77,8 @@ apt update
 
 !!! info
 
-    A paid repository subscription is required for RHEL repositories. Get more information on
-    [icinga.com/subscription](https://icinga.com/subscription)
+A paid repository subscription is required for RHEL repositories. Get more information on
+[icinga.com/subscription](https://icinga.com/subscription)
 
     Don't forget to fill in the username and password section with your credentials in the local .repo file.
 
